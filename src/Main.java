@@ -3,6 +3,7 @@ import java.awt.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.List;
+import javax.swing.Timer;
 
 public class Main extends JFrame {
     public Main() {
@@ -32,11 +33,22 @@ class AnimationPanel extends JPanel {
     private String documentTitle = "";
     private List<String> titleLines = new ArrayList<>();
     
+    // Typing effect state
+    private String fullText = "";           // processed text to display (markers removed)
+    private int typedChars = 0;              // number of characters currently typed
+    private double charAccumulator = 0.0;    // fractional character accumulator
+    private long lastTimeNanos = -1;         // last timestamp for typing update
+    private double totalTypingSeconds = 0.0; // total typing time since start
+    private final double MIN_WPM = 30.0;     // starting speed
+    private final double MAX_WPM = 200.0;    // max speed
+    private final double ACCEL_DURATION = 15.0; // seconds to reach max speed
+    
     public AnimationPanel() {
         loadFiles();
         
         Timer timer = new Timer(30, e -> {
             frame++;
+            updateTyping();
             repaint();
         });
         timer.start();
@@ -44,19 +56,20 @@ class AnimationPanel extends JPanel {
     
     private void loadFiles() {
         try {
-            String writingPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\English\\src\\writing.txt";
+            String writingPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\writing.txt";
             String raw = new String(Files.readAllBytes(Paths.get(writingPath)));
             
             // Load titles.txt
-            String titlesPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\English\\src\\titles.txt";
+            String titlesPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\titles.txt";
             titleLines = Files.readAllLines(Paths.get(titlesPath));
             
             // Parse [TITLE_NUMBER] pattern
-            int start = raw.indexOf("[TITLE");
+            int start = raw.indexOf("[TITLE_");
             if (start >= 0) {
                 int end = raw.indexOf("]", start);
                 if (end > start) {
-                    String marker = raw.substring(start + 6, end); // Skip "[TITLE"
+                    // Extract the number after the underscore in "[TITLE_#]"
+                    String marker = raw.substring(start + 7, end);
                     try {
                         int lineNum = Integer.parseInt(marker) - 1; // Convert to 0-based
                         if (lineNum >= 0 && lineNum < titleLines.size()) {
@@ -67,9 +80,54 @@ class AnimationPanel extends JPanel {
                     }
                 }
             }
+
+            // Prepare the body text: remove bracketed control markers like [TITLE_1], [LEFT_COMMENT_1], [PAUSE], etc.
+            // Keep the actual prose only.
+            fullText = raw.replaceAll("\\[[A-Z_0-9]+\\]", "").trim();
         } catch (Exception e) {
             documentTitle = "";
+            fullText = "";
             e.printStackTrace();
+        }
+    }
+
+    private int getFadeOutEndFrame() {
+        int titleEnd = TITLE_FADE_IN + TITLE_HOLD;
+        int bylineEnd = titleEnd + BYLINE_FADE_IN + BYLINE_HOLD;
+        return bylineEnd + FADE_OUT;
+    }
+
+    private void updateTyping() {
+        // Start typing after the intro fades out and frames are visible
+        if (frame <= getFadeOutEndFrame()) {
+            lastTimeNanos = -1; // ensure timer starts when typing begins
+            return;
+        }
+        if (fullText == null || fullText.isEmpty() || typedChars >= fullText.length()) {
+            return;
+        }
+
+        long now = System.nanoTime();
+        if (lastTimeNanos < 0) {
+            lastTimeNanos = now;
+            return;
+        }
+
+        double dt = (now - lastTimeNanos) / 1_000_000_000.0; // seconds
+        lastTimeNanos = now;
+        totalTypingSeconds += dt;
+
+        // Linear acceleration from MIN_WPM to MAX_WPM over ACCEL_DURATION seconds
+        double t = Math.min(1.0, totalTypingSeconds / ACCEL_DURATION);
+        double currentWpm = MIN_WPM + (MAX_WPM - MIN_WPM) * t;
+        double charsPerSecond = (currentWpm * 5.0) / 60.0; // 5 chars per "word" convention
+        double charsThisTick = charsPerSecond * dt;
+
+        charAccumulator += charsThisTick;
+        int advance = (int)Math.floor(charAccumulator);
+        if (advance > 0) {
+            typedChars = Math.min(fullText.length(), typedChars + advance);
+            charAccumulator -= advance;
         }
     }
     
@@ -164,6 +222,84 @@ class AnimationPanel extends JPanel {
             // Right comment box
             int rightCommentX = margin + commentWidth + margin;
             g2d.drawRoundRect(rightCommentX, commentY, commentWidth, commentHeight, 15, 15);
+
+            // Draw typed body text with visual cursor inside the main frame
+            if (!fullText.isEmpty()) {
+                g2d.setColor(new Color(0, 0, 0, alpha));
+                g2d.setFont(new Font("Georgia", Font.PLAIN, 18));
+                FontMetrics tfm = g2d.getFontMetrics();
+                int textX = mainFrameX + 20;
+                int textY = mainFrameY + 60; // start below title area
+                int textWidth = mainFrameWidth - 40;
+                int lineHeight = tfm.getHeight();
+
+                String visible = fullText.substring(0, Math.min(typedChars, fullText.length()));
+                Point caret = drawWrappedText(g2d, visible, textX, textY, textWidth, lineHeight);
+
+                // Blinking caret (visible ~500ms on/off)
+                if (typedChars < fullText.length()) {
+                    boolean showCaret = ((int)(totalTypingSeconds * 2)) % 2 == 0; // toggle every ~0.5s
+                    if (showCaret) {
+                        int caretHeight = tfm.getAscent();
+                        int caretWidth = 2;
+                        int cx = caret.x;
+                        int cy = caret.y - tfm.getAscent();
+                        g2d.fillRect(cx, cy, caretWidth, caretHeight);
+                    }
+                }
+            }
         }
+    }
+
+    // Draws wrapped text within the given width. Returns the caret position (x,y baseline) at the end.
+    private Point drawWrappedText(Graphics2D g2d, String text, int x, int y, int maxWidth, int lineHeight) {
+        FontMetrics fm = g2d.getFontMetrics();
+        int cursorX = x;
+        int cursorY = y;
+        if (text == null || text.isEmpty()) {
+            return new Point(cursorX, cursorY);
+        }
+
+        // Split on whitespace but preserve spaces by rebuilding words
+        String[] words = text.split("\\s+");
+        StringBuilder line = new StringBuilder();
+        int idx = 0;
+        int textLen = text.length();
+        int processed = 0;
+
+        // Reconstruct by scanning characters to handle partial words at the end
+        // Build lines by adding tokens while measuring width
+        // To preserve original spacing, we iterate characters and wrap when needed
+        StringBuilder currentLine = new StringBuilder();
+        for (int i = 0; i < textLen; i++) {
+            char c = text.charAt(i);
+            currentLine.append(c);
+            String candidate = currentLine.toString();
+            int candidateWidth = fm.stringWidth(candidate);
+            if (candidateWidth > maxWidth || c == '\n') {
+                // Wrap before this char, unless the line is empty
+                String toDraw;
+                if (c == '\n') {
+                    // draw line without the newline
+                    toDraw = candidate.substring(0, candidate.length() - 1);
+                } else if (candidate.length() > 1) {
+                    // Back off one char for wrapping
+                    toDraw = candidate.substring(0, candidate.length() - 1);
+                    // Start new line with the current char
+                    i--; // reprocess this char on the next line
+                } else {
+                    toDraw = candidate; // single very long character edge case
+                }
+                g2d.drawString(toDraw, x, y);
+                y += lineHeight;
+                currentLine.setLength(0);
+            }
+        }
+        // Draw the remainder
+        String remainder = currentLine.toString();
+        g2d.drawString(remainder, x, y);
+        cursorX = x + fm.stringWidth(remainder);
+        cursorY = y + fm.getAscent();
+        return new Point(cursorX, cursorY);
     }
 }
