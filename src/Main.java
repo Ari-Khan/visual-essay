@@ -39,9 +39,9 @@ class AnimationPanel extends JPanel {
     private double charAccumulator = 0.0;    // fractional character accumulator
     private long lastTimeNanos = -1;         // last timestamp for typing update
     private double totalTypingSeconds = 0.0; // total typing time since start
-    private final double MIN_WPM = 30.0;     // starting speed
-    private final double MAX_WPM = 200.0;    // max speed
-    private final double ACCEL_DURATION = 15.0; // seconds to reach max speed
+    private final double MIN_WPM = 50.0;     // starting speed
+    private final double MAX_WPM = 800.0;    // max speed (increased)
+    private final double ACCEL_DURATION = 8.0; // faster acceleration to max speed
     
     public AnimationPanel() {
         loadFiles();
@@ -119,7 +119,9 @@ class AnimationPanel extends JPanel {
 
         // Linear acceleration from MIN_WPM to MAX_WPM over ACCEL_DURATION seconds
         double t = Math.min(1.0, totalTypingSeconds / ACCEL_DURATION);
-        double currentWpm = MIN_WPM + (MAX_WPM - MIN_WPM) * t;
+        // Ease-in (quadratic) to increase acceleration noticeably
+        double tEased = t * t;
+        double currentWpm = MIN_WPM + (MAX_WPM - MIN_WPM) * tEased;
         double charsPerSecond = (currentWpm * 5.0) / 60.0; // 5 chars per "word" convention
         double charsThisTick = charsPerSecond * dt;
 
@@ -207,7 +209,7 @@ class AnimationPanel extends JPanel {
             // Draw document title at top of main frame
             if (!documentTitle.isEmpty()) {
                 g2d.setColor(new Color(0, 0, 0, alpha));
-                g2d.setFont(new Font("Georgia", Font.PLAIN, 18));
+                g2d.setFont(new Font("Georgia", Font.BOLD, 18));
                 g2d.drawString(documentTitle, mainFrameX + 20, mainFrameY + 35);
             }
             
@@ -234,71 +236,159 @@ class AnimationPanel extends JPanel {
                 int lineHeight = tfm.getHeight();
 
                 String visible = fullText.substring(0, Math.min(typedChars, fullText.length()));
-                Point caret = drawWrappedText(g2d, visible, textX, textY, textWidth, lineHeight);
+                java.util.List<String> lines = wrapTextToLines(g2d, visible, textWidth);
 
-                // Blinking caret (visible ~500ms on/off)
+                int contentHeight = mainFrameHeight - (textY - mainFrameY) - 20; // bottom padding
+                int maxLines = Math.max(1, contentHeight / lineHeight);
+                int startLine = Math.max(0, lines.size() - maxLines); // scroll older lines off the top
+
+                int drawY = textY;
+                for (int i = startLine; i < lines.size(); i++) {
+                    g2d.drawString(lines.get(i), textX, drawY);
+                    drawY += lineHeight;
+                }
+
+                // Blinking caret (visible ~500ms on/off), lighter color
                 if (typedChars < fullText.length()) {
                     boolean showCaret = ((int)(totalTypingSeconds * 2)) % 2 == 0; // toggle every ~0.5s
                     if (showCaret) {
-                        int caretHeight = tfm.getAscent();
-                        int caretWidth = 2;
-                        int cx = caret.x;
-                        int cy = caret.y - tfm.getAscent();
-                        g2d.fillRect(cx, cy, caretWidth, caretHeight);
+                        if (!lines.isEmpty()) {
+                            int caretHeight = tfm.getAscent();
+                            int caretWidth = 2;
+                            int lastIndex = Math.max(startLine, lines.size() - 1);
+                            int cx = textX + tfm.stringWidth(lines.get(lastIndex));
+                            int baselineY = drawY - lineHeight; // baseline of last drawn line
+                            int cy = baselineY - tfm.getAscent();
+                            int caretAlpha = Math.max(30, alpha / 2); // lighter caret
+                            Color prev = g2d.getColor();
+                            g2d.setColor(new Color(0, 0, 0, caretAlpha));
+                            g2d.fillRect(cx, cy, caretWidth, caretHeight);
+                            g2d.setColor(prev);
+                        }
                     }
                 }
             }
         }
     }
 
+    // Wrap text into lines without drawing; word-safe wrapping with newline support
+    private java.util.List<String> wrapTextToLines(Graphics2D g2d, String text, int maxWidth) {
+        FontMetrics fm = g2d.getFontMetrics();
+        java.util.List<String> result = new java.util.ArrayList<>();
+        if (text == null || text.isEmpty()) return result;
+
+        StringBuilder line = new StringBuilder();
+        int i = 0;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (c == '\n') {
+                result.add(line.toString());
+                line.setLength(0);
+                i++;
+                continue;
+            }
+
+            // collapse spaces to single space for wrapping purposes
+            if (Character.isWhitespace(c)) {
+                if (line.length() > 0 && line.charAt(line.length() - 1) != ' ') {
+                    line.append(' ');
+                }
+                while (i < text.length() && Character.isWhitespace(text.charAt(i)) && text.charAt(i) != '\n') {
+                    i++;
+                }
+                continue;
+            }
+
+            int start = i;
+            while (i < text.length()) {
+                char ch = text.charAt(i);
+                if (ch == '\n' || Character.isWhitespace(ch)) break;
+                i++;
+            }
+            String word = text.substring(start, i);
+
+            if (line.length() == 0) {
+                line.append(word);
+            } else {
+                String candidate = line.toString() + word;
+                if (fm.stringWidth(candidate) <= maxWidth) {
+                    line.setLength(0);
+                    line.append(candidate);
+                } else {
+                    result.add(line.toString());
+                    line.setLength(0);
+                    line.append(word);
+                }
+            }
+        }
+        result.add(line.toString());
+        return result;
+    }
+
     // Draws wrapped text within the given width. Returns the caret position (x,y baseline) at the end.
     private Point drawWrappedText(Graphics2D g2d, String text, int x, int y, int maxWidth, int lineHeight) {
         FontMetrics fm = g2d.getFontMetrics();
         int cursorX = x;
-        int cursorY = y;
+        int cursorY = y + fm.getAscent();
         if (text == null || text.isEmpty()) {
             return new Point(cursorX, cursorY);
         }
 
-        // Split on whitespace but preserve spaces by rebuilding words
-        String[] words = text.split("\\s+");
         StringBuilder line = new StringBuilder();
-        int idx = 0;
-        int textLen = text.length();
-        int processed = 0;
-
-        // Reconstruct by scanning characters to handle partial words at the end
-        // Build lines by adding tokens while measuring width
-        // To preserve original spacing, we iterate characters and wrap when needed
-        StringBuilder currentLine = new StringBuilder();
-        for (int i = 0; i < textLen; i++) {
+        int i = 0;
+        while (i < text.length()) {
             char c = text.charAt(i);
-            currentLine.append(c);
-            String candidate = currentLine.toString();
-            int candidateWidth = fm.stringWidth(candidate);
-            if (candidateWidth > maxWidth || c == '\n') {
-                // Wrap before this char, unless the line is empty
-                String toDraw;
-                if (c == '\n') {
-                    // draw line without the newline
-                    toDraw = candidate.substring(0, candidate.length() - 1);
-                } else if (candidate.length() > 1) {
-                    // Back off one char for wrapping
-                    toDraw = candidate.substring(0, candidate.length() - 1);
-                    // Start new line with the current char
-                    i--; // reprocess this char on the next line
-                } else {
-                    toDraw = candidate; // single very long character edge case
-                }
-                g2d.drawString(toDraw, x, y);
+            if (c == '\n') {
+                // Draw current line and move to next
+                g2d.drawString(line.toString(), x, y);
                 y += lineHeight;
-                currentLine.setLength(0);
+                line.setLength(0);
+                i++;
+                continue;
+            }
+
+            // Consume any whitespace as a single space (avoid leading spaces)
+            if (Character.isWhitespace(c)) {
+                // Only add a space if line currently has content
+                if (line.length() > 0) {
+                    // Space alone won't overflow; just add it
+                    line.append(' ');
+                }
+                // advance through contiguous whitespace
+                while (i < text.length() && Character.isWhitespace(text.charAt(i)) && text.charAt(i) != '\n') {
+                    i++;
+                }
+                continue;
+            }
+
+            // Consume a word (sequence of non-whitespace, non-newline)
+            int start = i;
+            while (i < text.length()) {
+                char ch = text.charAt(i);
+                if (ch == '\n' || Character.isWhitespace(ch)) break;
+                i++;
+            }
+            String word = text.substring(start, i);
+
+            // Decide to put word on current line or wrap
+            String candidate = (line.length() == 0) ? word : line.toString() + word;
+            int width = fm.stringWidth(candidate);
+            if (width <= maxWidth || line.length() == 0) {
+                // Fits on this line (or line empty even if long word)
+                line.setLength(0);
+                line.append(candidate);
+            } else {
+                // Draw current line and move to next, start with this word
+                g2d.drawString(line.toString(), x, y);
+                y += lineHeight;
+                line.setLength(0);
+                line.append(word);
             }
         }
-        // Draw the remainder
-        String remainder = currentLine.toString();
-        g2d.drawString(remainder, x, y);
-        cursorX = x + fm.stringWidth(remainder);
+
+        // Draw remainder
+        g2d.drawString(line.toString(), x, y);
+        cursorX = x + fm.stringWidth(line.toString());
         cursorY = y + fm.getAscent();
         return new Point(cursorX, cursorY);
     }
