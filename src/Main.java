@@ -54,8 +54,8 @@ class AnimationPanel extends JPanel {
     private long lastTimeNanos = -1;         
     private double totalTypingSeconds = 0.0; 
     private final double MIN_WPM = 100.0;     
-    private final double MAX_WPM = 1200.0;    
-    private final double ACCEL_DURATION = 5.0; 
+    private final double MAX_WPM = 1500.0;    
+    private final double ACCEL_DURATION = 8.0; 
     private long pauseUntilNanos = -1;       
     private long leftCommentClearUntilNanos = -1;  
     private long rightCommentClearUntilNanos = -1; 
@@ -499,6 +499,17 @@ class AnimationPanel extends JPanel {
             int contentStartFrame = startPressedFrame + FADE_OUT;
             if (frame > contentStartFrame) {
                 float frameOpacity = Math.min(1.0f, (frame - contentStartFrame) / (float)FRAME_FADE_IN);
+                
+                if (endSequenceStartFrame >= 0) {
+                    int elapsedEnd = frame - endSequenceStartFrame;
+                    if (elapsedEnd < END_FADE_OUT) {
+                        float endFade = 1.0f - (elapsedEnd / (float)END_FADE_OUT);
+                        frameOpacity *= endFade;
+                    } else {
+                        frameOpacity = 0;
+                    }
+                }
+                
                 int alpha = (int)(frameOpacity * 255);
                 long nowFrame = System.nanoTime();
                 if (labelFadeStartNanos < 0) labelFadeStartNanos = nowFrame;
@@ -678,19 +689,15 @@ class AnimationPanel extends JPanel {
                 }
             }
 
-            // Check if end sequence should be displayed
             if (endSequenceStartFrame >= 0) {
                 int elapsedEnd = frame - endSequenceStartFrame;
                 float endAlpha = 0;
                 
                 if (elapsedEnd < END_FADE_OUT) {
-                    // Fade out main content
                     endAlpha = 1.0f - (elapsedEnd / (float)END_FADE_OUT);
                 } else if (elapsedEnd >= END_FADE_OUT && elapsedEnd < END_FADE_OUT + END_FADE_IN) {
-                    // Fade in end screen
                     endAlpha = (elapsedEnd - END_FADE_OUT) / (float)END_FADE_IN;
                 } else {
-                    // Fully show end screen
                     endAlpha = 1.0f;
                 }
                 
@@ -713,7 +720,6 @@ class AnimationPanel extends JPanel {
                 }
             }
             
-            // Only render main content if end sequence hasn't started or is fading out
             if (endSequenceStartFrame < 0 || frame < endSequenceStartFrame + END_FADE_OUT) {
             
             g2d.setFont(new Font("Georgia", Font.PLAIN, 14));
