@@ -54,8 +54,8 @@ class AnimationPanel extends JPanel {
     private long lastTimeNanos = -1;         
     private double totalTypingSeconds = 0.0; 
     private final double MIN_WPM = 100.0;     
-    private final double MAX_WPM = 1500.0;    
-    private final double ACCEL_DURATION = 8.0; 
+    private final double MAX_WPM = 1200.0;    
+    private final double ACCEL_DURATION = 6.0; 
     private long pauseUntilNanos = -1;       
     private long leftCommentClearUntilNanos = -1;  
     private long rightCommentClearUntilNanos = -1; 
@@ -861,7 +861,7 @@ class AnimationPanel extends JPanel {
                 if (n > 0 && n - 1 < leftComments.size()) currentLeftComment = leftComments.get(n - 1);
                 leftCommentStartNanos = nowNanos;
                 
-                long duration = Math.min(10_000_000_000L, Math.max(3_000_000_000L, 2_000_000_000L + (currentLeftComment.length() / 50) * 1_000_000_000L));
+                long duration = Math.min((long)(12_500_000_000L), Math.max((long)(3_750_000_000L), (long)(2_500_000_000L + (currentLeftComment.length() / 50) * 1_250_000_000L)));
                 leftCommentClearUntilNanos = nowNanos + duration;
                 pauseUntilNanos = nowNanos + duration;
                 totalTypingSeconds = 0.0; 
@@ -872,7 +872,7 @@ class AnimationPanel extends JPanel {
                 if (n > 0 && n - 1 < rightComments.size()) currentRightComment = rightComments.get(n - 1);
                 rightCommentStartNanos = nowNanos;
                 
-                long duration = Math.min(10_000_000_000L, Math.max(3_000_000_000L, 2_000_000_000L + (currentRightComment.length() / 50) * 1_000_000_000L));
+                long duration = Math.min((long)(12_500_000_000L), Math.max((long)(3_750_000_000L), (long)(2_500_000_000L + (currentRightComment.length() / 50) * 1_250_000_000L)));
                 rightCommentClearUntilNanos = nowNanos + duration;
                 pauseUntilNanos = nowNanos + duration;
                 totalTypingSeconds = 0.0; 
