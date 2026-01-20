@@ -3,7 +3,9 @@ import java.awt.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.List;
+import javax.sound.sampled.*;
 import javax.swing.Timer;
+import java.io.File;
 
 public class Main extends JFrame {
     public Main() {
@@ -51,8 +53,8 @@ class AnimationPanel extends JPanel {
     private long lastTimeNanos = -1;         
     private double totalTypingSeconds = 0.0; 
     private final double MIN_WPM = 100.0;     
-    private final double MAX_WPM = 1000.0;    
-    private final double ACCEL_DURATION = 10.0; 
+    private final double MAX_WPM = 800.0;    
+    private final double ACCEL_DURATION = 6.0; 
     private long pauseUntilNanos = -1;       
     private long leftCommentClearUntilNanos = -1;  
     private long rightCommentClearUntilNanos = -1; 
@@ -70,9 +72,20 @@ class AnimationPanel extends JPanel {
     private final long LABEL_FADE_HOLD = 3_000_000_000L; 
     private final long LABEL_FADE_OUT = 500_000_000L; 
     private long lastTypeNanos = -1; 
+    private final Color BG_TOP = new Color(246, 244, 239);
+    private final Color BG_BOTTOM = new Color(232, 229, 223);
+    private final Color FRAME_FILL = new Color(255, 255, 255, 235);
+    private final Color FRAME_STROKE = new Color(34, 41, 57, 220);
+    private final Color COMMENT_LEFT_FILL = new Color(255, 243, 226, 210);
+    private final Color COMMENT_RIGHT_FILL = new Color(226, 240, 255, 210);
+    private final Color COMMENT_BORDER = new Color(34, 41, 57, 190);
+    private Clip typingLoop;
+    private boolean typingLoopReady = false;
+    private String typingLoopPath = "";
     
     public AnimationPanel() {
         loadFiles();
+        initTypingLoop();
         
         Timer timer = new Timer(30, e -> {
             frame++;
@@ -126,10 +139,55 @@ class AnimationPanel extends JPanel {
         }
     }
 
+    private void initTypingLoop() {
+        String[] candidates = {
+            "keyboard.wav",
+            "src" + File.separator + "keyboard.wav",
+            "bin" + File.separator + "keyboard.wav"
+        };
+        for (String path : candidates) {
+            try {
+                File f = new File(path);
+                if (!f.exists()) continue;
+                AudioInputStream ais = AudioSystem.getAudioInputStream(f);
+                AudioFormat base = ais.getFormat();
+                AudioFormat decoded = new AudioFormat(AudioFormat.Encoding.PCM_SIGNED, base.getSampleRate(), 16, base.getChannels(), base.getChannels() * 2, base.getSampleRate(), false);
+                AudioInputStream dais = AudioSystem.getAudioInputStream(decoded, ais);
+                Clip c = AudioSystem.getClip();
+                c.open(dais);
+                typingLoop = c;
+                typingLoopReady = true;
+                typingLoopPath = f.getAbsolutePath();
+                System.out.println("Loaded typing loop: " + typingLoopPath);
+                break;
+            } catch (Exception ex) {
+                typingLoop = null;
+                typingLoopReady = false;
+                typingLoopPath = "";
+            }
+        }
+        if (!typingLoopReady) {
+            System.out.println("keyboard.mp3 not loaded (codec or path issue). Place keyboard.mp3 in project root or src/.");
+        }
+    }
+
     private int getFadeOutEndFrame() {
         int titleEnd = TITLE_FADE_IN + TITLE_HOLD;
         int bylineEnd = titleEnd + BYLINE_FADE_IN + BYLINE_HOLD;
         return bylineEnd + FADE_OUT;
+    }
+
+    private void startTypingLoop() {
+        if (!typingLoopReady || typingLoop == null) return;
+        if (!typingLoop.isRunning()) {
+            typingLoop.setFramePosition(0);
+            typingLoop.loop(Clip.LOOP_CONTINUOUSLY);
+        }
+    }
+
+    private void stopTypingLoop() {
+        if (!typingLoopReady || typingLoop == null) return;
+        typingLoop.stop();
     }
 
     private void updateTyping() {
@@ -145,13 +203,16 @@ class AnimationPanel extends JPanel {
         }
 
         if (pauseUntilNanos > 0 && now < pauseUntilNanos) {
+            stopTypingLoop();
             return;
         }
-
-        
         if (pauseUntilNanos > 0 && now >= pauseUntilNanos) {
             pauseUntilNanos = -1;
             lastTimeNanos = now; 
+        }
+
+        if (typingLoopReady && lastTypeNanos > 0 && (now - lastTypeNanos) > 2_000_000_000L) {
+            stopTypingLoop();
         }
 
         
@@ -175,6 +236,7 @@ class AnimationPanel extends JPanel {
                 typedBuffer.deleteCharAt(typedBuffer.length() - 1);
                 mistakeDeleteRemaining--;
                 lastTypeNanos = now;
+                startTypingLoop();
                 return;
             } else {
                 mistakeActive = false;
@@ -267,6 +329,7 @@ class AnimationPanel extends JPanel {
                 mistakeDeleteRemaining = deleteCount;
                 mistakePauseUntilNanos = now + 150_000_000L; 
                 lastTypeNanos = now;
+                startTypingLoop();
 
                 
                 double slowdown = 0.8 + rng.nextDouble() * 0.6;
@@ -286,6 +349,7 @@ class AnimationPanel extends JPanel {
             rawIndex++;
             charAccumulator -= 1.0;
             lastTypeNanos = now;
+            startTypingLoop();
         }
     }
     
@@ -296,8 +360,11 @@ class AnimationPanel extends JPanel {
         g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         
         
-        g2d.setColor(Color.WHITE);
+        Paint oldPaint = g2d.getPaint();
+        GradientPaint bg = new GradientPaint(0, 0, BG_TOP, getWidth(), getHeight(), BG_BOTTOM);
+        g2d.setPaint(bg);
         g2d.fillRect(0, 0, getWidth(), getHeight());
+        g2d.setPaint(oldPaint);
         
         int titleEnd = TITLE_FADE_IN + TITLE_HOLD;
         int bylineEnd = titleEnd + BYLINE_FADE_IN + BYLINE_HOLD;
@@ -360,7 +427,12 @@ class AnimationPanel extends JPanel {
             int mainFrameWidth = getWidth() - (margin * 2);
             int mainFrameHeight = (int)(getHeight() * 0.75) - (margin * 2);
             
-            g2d.setColor(new Color(0, 0, 0, alpha));
+            double alphaRatio = alpha / 255.0;
+            int fillA = (int)(FRAME_FILL.getAlpha() * alphaRatio);
+            int strokeA = (int)(FRAME_STROKE.getAlpha() * alphaRatio);
+            g2d.setColor(new Color(FRAME_FILL.getRed(), FRAME_FILL.getGreen(), FRAME_FILL.getBlue(), fillA));
+            g2d.fillRoundRect(mainFrameX, mainFrameY, mainFrameWidth, mainFrameHeight, 30, 30);
+            g2d.setColor(new Color(FRAME_STROKE.getRed(), FRAME_STROKE.getGreen(), FRAME_STROKE.getBlue(), strokeA));
             g2d.setStroke(new BasicStroke(8));
             g2d.drawRoundRect(mainFrameX, mainFrameY, mainFrameWidth, mainFrameHeight, 30, 30);
             
@@ -418,7 +490,8 @@ class AnimationPanel extends JPanel {
             int hours = (totalMinutes / 60) % 24;
             int minutes = totalMinutes % 60;
             String clockTime = String.format("%02d:%02d", hours, minutes);
-            g2d.setColor(new Color(0, 0, 0, alpha));
+            int clockA = (int)(220 * (alpha / 255.0));
+            g2d.setColor(new Color(FRAME_STROKE.getRed(), FRAME_STROKE.getGreen(), FRAME_STROKE.getBlue(), clockA));
             g2d.setFont(new Font("Courier New", Font.PLAIN, 16));
             FontMetrics clockFm = g2d.getFontMetrics();
             int clockWidth = clockFm.stringWidth(clockTime);
@@ -433,11 +506,19 @@ class AnimationPanel extends JPanel {
             int rightCommentWidth = totalCommentWidth - leftCommentWidth;
             int commentHeight = getHeight() - commentY - margin;
             
-            g2d.setColor(new Color(0, 0, 0, alpha));
-            g2d.drawRoundRect(margin, commentY, leftCommentWidth, commentHeight, 15, 15);
-            
+            int leftFillA = (int)(COMMENT_LEFT_FILL.getAlpha() * (alpha / 255.0));
+            int rightFillA = (int)(COMMENT_RIGHT_FILL.getAlpha() * (alpha / 255.0));
+            int borderA = (int)(COMMENT_BORDER.getAlpha() * (alpha / 255.0));
+            g2d.setColor(new Color(COMMENT_LEFT_FILL.getRed(), COMMENT_LEFT_FILL.getGreen(), COMMENT_LEFT_FILL.getBlue(), leftFillA));
+            g2d.fillRoundRect(margin, commentY, leftCommentWidth, commentHeight, 15, 15);
             
             int rightCommentX = margin + leftCommentWidth + margin;
+            g2d.setColor(new Color(COMMENT_RIGHT_FILL.getRed(), COMMENT_RIGHT_FILL.getGreen(), COMMENT_RIGHT_FILL.getBlue(), rightFillA));
+            g2d.fillRoundRect(rightCommentX, commentY, rightCommentWidth, commentHeight, 15, 15);
+
+            g2d.setStroke(new BasicStroke(3));
+            g2d.setColor(new Color(COMMENT_BORDER.getRed(), COMMENT_BORDER.getGreen(), COMMENT_BORDER.getBlue(), borderA));
+            g2d.drawRoundRect(margin, commentY, leftCommentWidth, commentHeight, 15, 15);
             g2d.drawRoundRect(rightCommentX, commentY, rightCommentWidth, commentHeight, 15, 15);
 
             long labelElapsed = nowFrame - labelFadeStartNanos;
@@ -505,6 +586,8 @@ class AnimationPanel extends JPanel {
                         g2d.fillRect(cx, cy, caretWidth, caretHeight);
                         g2d.setColor(prev);
                     }
+                } else {
+                    stopTypingLoop();
                 }
             }
 
