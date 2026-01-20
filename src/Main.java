@@ -3,7 +3,6 @@ import java.awt.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.List;
-import java.util.regex.*;
 import javax.swing.Timer;
 
 public class Main extends JFrame {
@@ -32,6 +31,12 @@ class AnimationPanel extends JPanel {
     private final int FRAME_FADE_IN = 15;
     
     private String documentTitle = "";
+    private String oldTitle = "";  // title fading out
+    private String newTitle = "";  // title fading in
+    private long titleFadeOutStartNanos = -1;  // when title fade-out started
+    private long titleFadeInStartNanos = -1;   // when title fade-in started
+    private final long TITLE_FADE_OUT_DURATION = 300_000_000L;  // 300ms fade-out
+    private final long TITLE_FADE_IN_DURATION = 300_000_000L;   // 300ms fade-in
     private List<String> titleLines = new ArrayList<>();
     private List<String> leftComments = new ArrayList<>();
     private List<String> rightComments = new ArrayList<>();
@@ -42,13 +47,11 @@ class AnimationPanel extends JPanel {
     private String rawText = "";            // original writing with markers
     private StringBuilder typedBuffer = new StringBuilder(); // currently visible text
     private int rawIndex = 0;                // index into rawText
-    private String fullText = "";           // legacy (unused for typing)
-    private int typedChars = 0;              // legacy (unused for typing)
     private double charAccumulator = 0.0;    // fractional character accumulator
     private long lastTimeNanos = -1;         // last timestamp for typing update
     private double totalTypingSeconds = 0.0; // total typing time since start
     private final double MIN_WPM = 100.0;     // starting speed
-    private final double MAX_WPM = 800.0;    // max speed (increased)
+    private final double MAX_WPM = 1000.0;    // max speed (increased)
     private final double ACCEL_DURATION = 10.0; // faster acceleration to max speed
     private long pauseUntilNanos = -1;       // typing pause control
     private long leftCommentClearUntilNanos = -1;  // clear left comment at this time
@@ -61,6 +64,7 @@ class AnimationPanel extends JPanel {
     private int mistakeDeleteRemaining = 0;  // characters to delete for mistake
     private long mistakePauseUntilNanos = -1;    // brief pause before fixing mistake
     private long mistakeCooldownUntilNanos = -1; // prevent back-to-back mistakes
+    private double clockMinutes = 0.0;  // clock time in minutes since 12:00 (starts at 0 = 12:00)
     
     public AnimationPanel() {
         loadFiles();
@@ -110,10 +114,8 @@ class AnimationPanel extends JPanel {
             rawText = raw;
             typedBuffer.setLength(0);
             rawIndex = 0;
-            fullText = "";
         } catch (Exception e) {
             documentTitle = "";
-            fullText = "";
             e.printStackTrace();
         }
     }
@@ -185,6 +187,15 @@ class AnimationPanel extends JPanel {
         double currentWpm = MIN_WPM + (MAX_WPM - MIN_WPM) * tEased;
         double charsPerSecond = (currentWpm * 5.0) / 60.0;
         double charsThisTick = charsPerSecond * dt;
+
+        // Update clock: faster with typing speed, slower during pause/comments
+        double clockSpeed = 1.0; // base speed multiplier
+        if (pauseUntilNanos > 0 || leftCommentClearUntilNanos > 0 || rightCommentClearUntilNanos > 0) {
+            clockSpeed = 0.3; // slow down during pauses/comments
+        } else {
+            clockSpeed = currentWpm / MIN_WPM; // speed up with typing
+        }
+        clockMinutes += (dt / 60.0) * clockSpeed * 16.0; // convert seconds to minutes with speed multiplier (8x faster)
 
         charAccumulator += charsThisTick;
         while (charAccumulator >= 1.0) {
@@ -258,7 +269,12 @@ class AnimationPanel extends JPanel {
             }
 
             // Normal character (no mistake)
-            typedBuffer.append(correct);
+            if (correct == '\n') {
+                // Add newline plus 2 empty lines
+                typedBuffer.append("\n\n\n");
+            } else {
+                typedBuffer.append(correct);
+            }
             rawIndex++;
             charAccumulator -= 1.0;
         }
@@ -278,7 +294,7 @@ class AnimationPanel extends JPanel {
         int bylineEnd = titleEnd + BYLINE_FADE_IN + BYLINE_HOLD;
         int fadeOutEnd = bylineEnd + FADE_OUT;
         
-        // Draw title "Writer's Block"
+        // Draw title "Writer's Block" (intro fade in/out)
         float titleOpacity = 0;
         if (frame < TITLE_FADE_IN) {
             titleOpacity = frame / (float)TITLE_FADE_IN;
@@ -337,24 +353,81 @@ class AnimationPanel extends JPanel {
             g2d.setStroke(new BasicStroke(8));
             g2d.drawRoundRect(mainFrameX, mainFrameY, mainFrameWidth, mainFrameHeight, 30, 30);
             
-            // Draw document title at top of main frame
+            // Draw document title with fade transitions (essay titles only)
             if (!documentTitle.isEmpty()) {
-                g2d.setColor(new Color(0, 0, 0, alpha));
-                g2d.setFont(new Font("Georgia", Font.BOLD, 18));
-                g2d.drawString(documentTitle, mainFrameX + 20, mainFrameY + 35);
+                long now = System.nanoTime();
+                int titleAlpha = alpha;
+                
+                if (titleFadeOutStartNanos > 0) {
+                    long elapsed = now - titleFadeOutStartNanos;
+                    
+                    // Fade out old title
+                    if (elapsed < TITLE_FADE_OUT_DURATION) {
+                        float fadeOutOpacity = 1.0f - (elapsed / (float)TITLE_FADE_OUT_DURATION);
+                        titleAlpha = (int)(fadeOutOpacity * alpha);
+                        g2d.setColor(new Color(0, 0, 0, titleAlpha));
+                        g2d.setFont(new Font("Georgia", Font.BOLD, 18));
+                        g2d.drawString(oldTitle, mainFrameX + 20, mainFrameY + 35);
+                    } else {
+                        // Fade-out complete, start fade-in
+                        if (titleFadeInStartNanos < 0) {
+                            titleFadeInStartNanos = now;
+                        }
+                        
+                        long fadeInElapsed = now - titleFadeInStartNanos;
+                        if (fadeInElapsed < TITLE_FADE_IN_DURATION) {
+                            float fadeInOpacity = fadeInElapsed / (float)TITLE_FADE_IN_DURATION;
+                            titleAlpha = (int)(fadeInOpacity * alpha);
+                            g2d.setColor(new Color(0, 0, 0, titleAlpha));
+                            g2d.setFont(new Font("Georgia", Font.BOLD, 18));
+                            g2d.drawString(newTitle, mainFrameX + 20, mainFrameY + 35);
+                        } else {
+                            // Fade-in complete, set as current and clear transition state
+                            documentTitle = newTitle;
+                            titleFadeOutStartNanos = -1;
+                            titleFadeInStartNanos = -1;
+                            oldTitle = "";
+                            newTitle = "";
+                            // Draw normal title
+                            g2d.setColor(new Color(0, 0, 0, titleAlpha));
+                            g2d.setFont(new Font("Georgia", Font.BOLD, 18));
+                            g2d.drawString(documentTitle, mainFrameX + 20, mainFrameY + 35);
+                        }
+                    }
+                } else {
+                    // Normal title display (no transition)
+                    g2d.setColor(new Color(0, 0, 0, titleAlpha));
+                    g2d.setFont(new Font("Georgia", Font.BOLD, 18));
+                    g2d.drawString(documentTitle, mainFrameX + 20, mainFrameY + 35);
+                }
             }
             
-            // Left comment box (in the bottom 25% space)
+            // Draw 24-hour digital clock in top right corner
+            int totalMinutes = (int)clockMinutes;
+            int hours = (totalMinutes / 60) % 24;
+            int minutes = totalMinutes % 60;
+            String clockTime = String.format("%02d:%02d", hours, minutes);
+            g2d.setColor(new Color(0, 0, 0, alpha));
+            g2d.setFont(new Font("Courier New", Font.PLAIN, 16));
+            FontMetrics clockFm = g2d.getFontMetrics();
+            int clockWidth = clockFm.stringWidth(clockTime);
+            int clockX = mainFrameX + mainFrameWidth - clockWidth - 20;
+            int clockY = mainFrameY + 30;
+            g2d.drawString(clockTime, clockX, clockY);
+            
+            // Left comment box (in the bottom 25% space) - 75% of total width
             int commentY = (int)(getHeight() * 0.75);
-            int commentWidth = (getWidth() - (margin * 3)) / 2;
+            int totalCommentWidth = getWidth() - (margin * 3);
+            int leftCommentWidth = (int)(totalCommentWidth * 0.75);
+            int rightCommentWidth = totalCommentWidth - leftCommentWidth;
             int commentHeight = getHeight() - commentY - margin;
             
             g2d.setColor(new Color(0, 0, 0, alpha));
-            g2d.drawRoundRect(margin, commentY, commentWidth, commentHeight, 15, 15);
+            g2d.drawRoundRect(margin, commentY, leftCommentWidth, commentHeight, 15, 15);
             
-            // Right comment box
-            int rightCommentX = margin + commentWidth + margin;
-            g2d.drawRoundRect(rightCommentX, commentY, commentWidth, commentHeight, 15, 15);
+            // Right comment box - 25% of total width
+            int rightCommentX = margin + leftCommentWidth + margin;
+            g2d.drawRoundRect(rightCommentX, commentY, rightCommentWidth, commentHeight, 15, 15);
 
             // Draw typed body text with visual cursor inside the main frame
             if (typedBuffer.length() > 0 || (rawText != null && rawIndex < rawText.length())) {
@@ -402,15 +475,15 @@ class AnimationPanel extends JPanel {
             }
 
             // Render comments in the bottom boxes with fade-in
-            g2d.setFont(new Font("Georgia", Font.PLAIN, 18));
+            g2d.setFont(new Font("Georgia", Font.PLAIN, 14));
             FontMetrics cfm = g2d.getFontMetrics();
             int padding = 12;
             int leftInnerX = margin + padding;
-            int leftInnerW = commentWidth - padding * 2;
+            int leftInnerW = leftCommentWidth - padding * 2;
             int leftInnerH = commentHeight - padding * 2;
             int leftInnerY = commentY + padding + cfm.getAscent();
             int rightInnerX = rightCommentX + padding;
-            int rightInnerW = commentWidth - padding * 2;
+            int rightInnerW = rightCommentWidth - padding * 2;
             int rightInnerH = commentHeight - padding * 2;
             int rightInnerY = commentY + padding + cfm.getAscent();
 
@@ -518,15 +591,30 @@ class AnimationPanel extends JPanel {
         try {
             if (tag.startsWith("TITLE_")) {
                 int n = Integer.parseInt(tag.substring(6));
-                if (n > 0 && n - 1 < titleLines.size()) documentTitle = titleLines.get(n - 1);
+                if (n > 0 && n - 1 < titleLines.size()) {
+                    // Start title fade transition
+                    oldTitle = documentTitle;
+                    newTitle = titleLines.get(n - 1);
+                    titleFadeOutStartNanos = nowNanos;
+                    titleFadeInStartNanos = -1;
+                    // Clear comments immediately
+                    currentLeftComment = "";
+                    currentRightComment = "";
+                    leftCommentClearUntilNanos = -1;
+                    rightCommentClearUntilNanos = -1;
+                    leftCommentStartNanos = -1;
+                    rightCommentStartNanos = -1;
+                }
                 return true;
             }
             if (tag.startsWith("LEFT_COMMENT_")) {
                 int n = Integer.parseInt(tag.substring(13));
                 if (n > 0 && n - 1 < leftComments.size()) currentLeftComment = leftComments.get(n - 1);
                 leftCommentStartNanos = nowNanos;
-                leftCommentClearUntilNanos = nowNanos + 2_000_000_000L; // show for 2s
-                pauseUntilNanos = nowNanos + 2_000_000_000L; // pause typing for 2s
+                // Duration based on comment length: 2s + 1s per 50 chars (min 3s, max 10s)
+                long duration = Math.min(10_000_000_000L, Math.max(3_000_000_000L, 2_000_000_000L + (currentLeftComment.length() / 50) * 1_000_000_000L));
+                leftCommentClearUntilNanos = nowNanos + duration;
+                pauseUntilNanos = nowNanos + duration;
                 totalTypingSeconds = 0.0; // reset speed accumulator
                 return true;
             }
@@ -534,8 +622,10 @@ class AnimationPanel extends JPanel {
                 int n = Integer.parseInt(tag.substring(14));
                 if (n > 0 && n - 1 < rightComments.size()) currentRightComment = rightComments.get(n - 1);
                 rightCommentStartNanos = nowNanos;
-                rightCommentClearUntilNanos = nowNanos + 2_000_000_000L; // show for 2s
-                pauseUntilNanos = nowNanos + 2_000_000_000L; // pause typing for 2s
+                // Duration based on comment length: 2s + 1s per 50 chars (min 3s, max 10s)
+                long duration = Math.min(10_000_000_000L, Math.max(3_000_000_000L, 2_000_000_000L + (currentRightComment.length() / 50) * 1_000_000_000L));
+                rightCommentClearUntilNanos = nowNanos + duration;
+                pauseUntilNanos = nowNanos + duration;
                 totalTypingSeconds = 0.0; // reset speed accumulator
                 return true;
             }
