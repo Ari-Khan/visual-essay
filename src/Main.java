@@ -67,8 +67,9 @@ class AnimationPanel extends JPanel {
     private double clockMinutes = 0.0;  
     private long labelFadeStartNanos = -1;  
     private final long LABEL_FADE_IN = 500_000_000L; 
-    private final long LABEL_FADE_HOLD = 1_000_000_000L; 
+    private final long LABEL_FADE_HOLD = 3_000_000_000L; 
     private final long LABEL_FADE_OUT = 500_000_000L; 
+    private long lastTypeNanos = -1; 
     
     public AnimationPanel() {
         loadFiles();
@@ -79,6 +80,7 @@ class AnimationPanel extends JPanel {
             repaint();
         });
         timer.start();
+        lastTypeNanos = System.nanoTime();
     }
     
     private void loadFiles() {
@@ -172,6 +174,7 @@ class AnimationPanel extends JPanel {
             if (mistakeDeleteRemaining > 0 && typedBuffer.length() > 0) {
                 typedBuffer.deleteCharAt(typedBuffer.length() - 1);
                 mistakeDeleteRemaining--;
+                lastTypeNanos = now;
                 return;
             } else {
                 mistakeActive = false;
@@ -263,6 +266,7 @@ class AnimationPanel extends JPanel {
                 mistakeActive = true;
                 mistakeDeleteRemaining = deleteCount;
                 mistakePauseUntilNanos = now + 150_000_000L; 
+                lastTypeNanos = now;
 
                 
                 double slowdown = 0.8 + rng.nextDouble() * 0.6;
@@ -281,6 +285,7 @@ class AnimationPanel extends JPanel {
             }
             rawIndex++;
             charAccumulator -= 1.0;
+            lastTypeNanos = now;
         }
     }
     
@@ -344,6 +349,8 @@ class AnimationPanel extends JPanel {
         if (frame > fadeOutEnd) {
             float frameOpacity = Math.min(1.0f, (frame - fadeOutEnd) / (float)FRAME_FADE_IN);
             int alpha = (int)(frameOpacity * 255);
+            long nowFrame = System.nanoTime();
+            if (labelFadeStartNanos < 0) labelFadeStartNanos = nowFrame;
             
             int margin = (int)(Math.min(getWidth(), getHeight()) * 0.05);
             
@@ -433,6 +440,29 @@ class AnimationPanel extends JPanel {
             int rightCommentX = margin + leftCommentWidth + margin;
             g2d.drawRoundRect(rightCommentX, commentY, rightCommentWidth, commentHeight, 15, 15);
 
+            long labelElapsed = nowFrame - labelFadeStartNanos;
+            double labelFadeRatio = 0.0;
+            if (labelElapsed < LABEL_FADE_IN) {
+                labelFadeRatio = Math.min(1.0, labelElapsed / (double)LABEL_FADE_IN);
+            } else if (labelElapsed < LABEL_FADE_IN + LABEL_FADE_HOLD) {
+                labelFadeRatio = 1.0;
+            } else if (labelElapsed < LABEL_FADE_IN + LABEL_FADE_HOLD + LABEL_FADE_OUT) {
+                long fadeOutElapsed = labelElapsed - (LABEL_FADE_IN + LABEL_FADE_HOLD);
+                labelFadeRatio = 1.0 - Math.min(1.0, fadeOutElapsed / (double)LABEL_FADE_OUT);
+            }
+            int labelAlpha = (int)(alpha * labelFadeRatio);
+            if (labelAlpha > 0) {
+                g2d.setFont(new Font("Georgia", Font.BOLD, 22));
+                FontMetrics labelFm = g2d.getFontMetrics();
+                g2d.setColor(new Color(0, 0, 0, labelAlpha));
+                int leftTextX = margin + 18;
+                int leftTextY = commentY + 18 + labelFm.getAscent();
+                g2d.drawString("Ari", leftTextX, leftTextY);
+                int rightTextX = rightCommentX + 18;
+                int rightTextY = commentY + 18 + labelFm.getAscent();
+                g2d.drawString("Mr. Wu", rightTextX, rightTextY);
+            }
+
             
             if (typedBuffer.length() > 0 || (rawText != null && rawIndex < rawText.length())) {
                 g2d.setColor(new Color(0, 0, 0, alpha));
@@ -459,21 +489,21 @@ class AnimationPanel extends JPanel {
                 
                 boolean hasMoreToType = rawText != null && rawIndex < rawText.length();
                 if (hasMoreToType) {
-                    boolean showCaret = ((int)(totalTypingSeconds * 2)) % 2 == 0; 
-                    if (showCaret) {
-                        if (!lines.isEmpty()) {
-                            int caretHeight = tfm.getAscent();
-                            int caretWidth = 2;
-                            int lastIndex = Math.max(startLine, lines.size() - 1);
-                            int cx = textX + tfm.stringWidth(lines.get(lastIndex));
-                            int baselineY = drawY - lineHeight; 
-                            int cy = baselineY - tfm.getAscent();
-                            int caretAlpha = Math.max(30, alpha / 2); 
-                            Color prev = g2d.getColor();
-                            g2d.setColor(new Color(0, 0, 0, caretAlpha));
-                            g2d.fillRect(cx, cy, caretWidth, caretHeight);
-                            g2d.setColor(prev);
-                        }
+                    long nowCaret = System.nanoTime();
+                    boolean isIdle = lastTypeNanos > 0 && (nowCaret - lastTypeNanos) > 400_000_000L; 
+                    boolean showCaret = isIdle ? ((nowCaret / 500_000_000L) % 2 == 0) : true; 
+                    if (showCaret && !lines.isEmpty()) {
+                        int caretHeight = tfm.getAscent();
+                        int caretWidth = 2;
+                        int lastIndex = Math.max(startLine, lines.size() - 1);
+                        int cx = textX + tfm.stringWidth(lines.get(lastIndex));
+                        int baselineY = drawY - lineHeight; 
+                        int cy = baselineY - tfm.getAscent();
+                        int caretAlpha = alpha; 
+                        Color prev = g2d.getColor();
+                        g2d.setColor(new Color(0, 0, 0, caretAlpha));
+                        g2d.fillRect(cx, cy, caretWidth, caretHeight);
+                        g2d.setColor(prev);
                     }
                 }
             }
