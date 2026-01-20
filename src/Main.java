@@ -82,6 +82,9 @@ class AnimationPanel extends JPanel {
     private Clip typingLoop;
     private boolean typingLoopReady = false;
     private String typingLoopPath = "";
+    private FloatControl typingRateControl;
+    private FloatControl typingGainControl;
+    private float typingBaseSampleRate = -1f;
     
     public AnimationPanel() {
         loadFiles();
@@ -158,12 +161,22 @@ class AnimationPanel extends JPanel {
                 typingLoop = c;
                 typingLoopReady = true;
                 typingLoopPath = f.getAbsolutePath();
+                if (c.isControlSupported(FloatControl.Type.SAMPLE_RATE)) {
+                    typingRateControl = (FloatControl)c.getControl(FloatControl.Type.SAMPLE_RATE);
+                    typingBaseSampleRate = typingRateControl.getValue();
+                }
+                if (c.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
+                    typingGainControl = (FloatControl)c.getControl(FloatControl.Type.MASTER_GAIN);
+                }
                 System.out.println("Loaded typing loop: " + typingLoopPath);
                 break;
             } catch (Exception ex) {
                 typingLoop = null;
                 typingLoopReady = false;
                 typingLoopPath = "";
+                typingRateControl = null;
+                typingGainControl = null;
+                typingBaseSampleRate = -1f;
             }
         }
         if (!typingLoopReady) {
@@ -188,6 +201,20 @@ class AnimationPanel extends JPanel {
     private void stopTypingLoop() {
         if (!typingLoopReady || typingLoop == null) return;
         typingLoop.stop();
+    }
+
+    private void updateTypingLoopSpeed(double currentWpm) {
+        if (!typingLoopReady || typingLoop == null) return;
+        double norm = Math.max(0.0, Math.min(1.0, (currentWpm - MIN_WPM) / (MAX_WPM - MIN_WPM)));
+        double rateFactor = 0.75 + norm * 2.0; 
+        if (typingRateControl != null && typingBaseSampleRate > 0) {
+            float desired = (float)Math.max(typingRateControl.getMinimum(), Math.min(typingRateControl.getMaximum(), typingBaseSampleRate * rateFactor));
+            typingRateControl.setValue(desired);
+        } else if (typingGainControl != null) {
+            float gainDb = (float)((rateFactor - 1.0) * 1.5); 
+            float clamped = Math.max(typingGainControl.getMinimum(), Math.min(typingGainControl.getMaximum(), gainDb));
+            typingGainControl.setValue(clamped);
+        }
     }
 
     private void updateTyping() {
@@ -256,6 +283,7 @@ class AnimationPanel extends JPanel {
         double currentWpm = MIN_WPM + (MAX_WPM - MIN_WPM) * tEased;
         double charsPerSecond = (currentWpm * 5.0) / 60.0;
         double charsThisTick = charsPerSecond * dt;
+        updateTypingLoopSpeed(currentWpm);
 
         
         double clockSpeed = 1.0; 
