@@ -56,6 +56,11 @@ class AnimationPanel extends JPanel {
     private long leftCommentStartNanos = -1;  // when left comment fade-in started
     private long rightCommentStartNanos = -1; // when right comment fade-in started
     private final long COMMENT_FADE_DURATION_NANOS = 300_000_000L; // 300ms fade-in
+    private final Random rng = new Random(); // for mistake simulation
+    private boolean mistakeActive = false;   // whether we are deleting a mistake
+    private int mistakeDeleteRemaining = 0;  // characters to delete for mistake
+    private long mistakePauseUntilNanos = -1;    // brief pause before fixing mistake
+    private long mistakeCooldownUntilNanos = -1; // prevent back-to-back mistakes
     
     public AnimationPanel() {
         loadFiles();
@@ -153,6 +158,23 @@ class AnimationPanel extends JPanel {
             rightCommentStartNanos = -1;
         }
 
+        // If we're fixing a mistake, wait briefly, then delete characters one by one
+        if (mistakeActive) {
+            if (mistakePauseUntilNanos > 0 && now < mistakePauseUntilNanos) {
+                return;
+            }
+            if (mistakeDeleteRemaining > 0 && typedBuffer.length() > 0) {
+                typedBuffer.deleteCharAt(typedBuffer.length() - 1);
+                mistakeDeleteRemaining--;
+                return;
+            } else {
+                mistakeActive = false;
+                mistakeDeleteRemaining = 0;
+                mistakePauseUntilNanos = -1;
+                mistakeCooldownUntilNanos = now + 500_000_000L; // 0.5s cooldown before next mistake
+            }
+        }
+
         double dt = (now - lastTimeNanos) / 1_000_000_000.0; // seconds
         lastTimeNanos = now;
         totalTypingSeconds += dt;
@@ -184,8 +206,59 @@ class AnimationPanel extends JPanel {
                 }
             }
 
-            // Normal character
-            typedBuffer.append(rawText.charAt(rawIndex));
+            // Normal character with occasional mistake simulation
+            char correct = rawText.charAt(rawIndex);
+
+                        boolean triggerMistake = !mistakeActive
+                            && (mistakeCooldownUntilNanos < 0 || now >= mistakeCooldownUntilNanos)
+                            && !Character.isWhitespace(correct)
+                            && rng.nextDouble() < 0.015; // ~1.5% chance per character for realism
+
+            if (triggerMistake) {
+                // Decide a wrong character
+                char wrong = correct;
+                if (Character.isLetter(correct)) {
+                    char base = Character.isUpperCase(correct) ? 'A' : 'a';
+                    do {
+                        wrong = (char) (base + rng.nextInt(26));
+                    } while (Character.toLowerCase(wrong) == Character.toLowerCase(correct));
+                } else {
+                    wrong = (char) ('a' + rng.nextInt(26));
+                }
+
+                // Determine how many chars to erase (current word including this wrong char)
+                int wordStart = typedBuffer.length();
+                for (int i = typedBuffer.length() - 1; i >= 0; i--) {
+                    char c = typedBuffer.charAt(i);
+                    if (Character.isWhitespace(c)) {
+                        wordStart = i + 1;
+                        break;
+                    }
+                }
+                int deleteCount = (typedBuffer.length() - wordStart) + 1; // include wrong char we add now
+
+                // Move rawIndex back to the start of the word so it retypes correctly
+                int rawWordStart = rawIndex;
+                while (rawWordStart > 0 && !Character.isWhitespace(rawText.charAt(rawWordStart - 1))) {
+                    rawWordStart--;
+                }
+                rawIndex = rawWordStart;
+
+                typedBuffer.append(wrong);
+                mistakeActive = true;
+                mistakeDeleteRemaining = deleteCount;
+                mistakePauseUntilNanos = now + 150_000_000L; // 150ms hesitation before fixing
+
+                // Apply a small, natural slowdown (0.8s–1.4s) to mimic hesitation
+                double slowdown = 0.8 + rng.nextDouble() * 0.6;
+                totalTypingSeconds = Math.max(0.0, totalTypingSeconds - slowdown);
+
+                charAccumulator -= 1.0;
+                continue;
+            }
+
+            // Normal character (no mistake)
+            typedBuffer.append(correct);
             rawIndex++;
             charAccumulator -= 1.0;
         }
