@@ -1,11 +1,15 @@
 import javax.swing.*;
 import java.awt.*;
-import java.nio.file.*;
 import java.util.*;
 import java.util.List;
 import javax.sound.sampled.*;
 import javax.swing.Timer;
-import java.io.File;
+import java.io.InputStream;
+import java.io.BufferedInputStream;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 
 public class Main extends JFrame {
     public Main() {
@@ -82,10 +86,14 @@ class AnimationPanel extends JPanel {
     private final Color COMMENT_BORDER = new Color(34, 41, 57, 190);
     private Clip typingLoop;
     private boolean typingLoopReady = false;
-    private String typingLoopPath = "";
     private FloatControl typingRateControl;
     private FloatControl typingGainControl;
     private float typingBaseSampleRate = -1f;
+    private Clip backgroundMusic;
+    private boolean backgroundMusicReady = false;
+    private FloatControl backgroundGainControl;
+    private Clip dingSound;
+    private boolean dingSoundReady = false;
     private boolean waitingToStart = true;
     private int startPressedFrame = -1;
     private int endSequenceStartFrame = -1;
@@ -95,6 +103,9 @@ class AnimationPanel extends JPanel {
     public AnimationPanel() {
         loadFiles();
         initTypingLoop();
+        initBackgroundMusic();
+        initDingSound();
+        startBackgroundMusic();
         
         setFocusable(true);
         addKeyListener(new java.awt.event.KeyAdapter() {
@@ -104,6 +115,8 @@ class AnimationPanel extends JPanel {
                     waitingToStart = false;
                     startPressedFrame = frame;
                     lastTypeNanos = System.nanoTime();
+                    playDing();
+                    startBackgroundMusic();
                     repaint();
                 }
             }
@@ -121,28 +134,18 @@ class AnimationPanel extends JPanel {
     
     private void loadFiles() {
         try {
-            String writingPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\writing.txt";
-            String raw = new String(Files.readAllBytes(Paths.get(writingPath)));
-            
-            
-            String titlesPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\titles.txt";
-            titleLines = Files.readAllLines(Paths.get(titlesPath));
-            
-            
-            String leftPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\left_comments.txt";
-            String rightPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\right_comments.txt";
-            if (Files.exists(Paths.get(leftPath))) leftComments = Files.readAllLines(Paths.get(leftPath));
-            if (Files.exists(Paths.get(rightPath))) rightComments = Files.readAllLines(Paths.get(rightPath));
-            
-            
-            int start = raw.indexOf("[TITLE_");
+            rawText = readResourceAsString("/writing.txt");
+            titleLines = readResourceAsLines("/titles.txt");
+            leftComments = readResourceAsLinesOptional("/left_comments.txt");
+            rightComments = readResourceAsLinesOptional("/right_comments.txt");
+
+            int start = rawText.indexOf("[TITLE_");
             if (start >= 0) {
-                int end = raw.indexOf("]", start);
+                int end = rawText.indexOf("]", start);
                 if (end > start) {
-                    
-                    String marker = raw.substring(start + 7, end);
+                    String marker = rawText.substring(start + 7, end);
                     try {
-                        int lineNum = Integer.parseInt(marker) - 1; 
+                        int lineNum = Integer.parseInt(marker) - 1;
                         if (lineNum >= 0 && lineNum < titleLines.size()) {
                             documentTitle = titleLines.get(lineNum);
                         }
@@ -152,8 +155,6 @@ class AnimationPanel extends JPanel {
                 }
             }
 
-            
-            rawText = raw;
             typedBuffer.setLength(0);
             rawIndex = 0;
         } catch (Exception e) {
@@ -162,25 +163,71 @@ class AnimationPanel extends JPanel {
         }
     }
 
+    private String readResourceAsString(String name) throws Exception {
+        try (InputStream is = Main.class.getResourceAsStream(name)) {
+            if (is == null) throw new IllegalArgumentException("Missing resource: " + name);
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private List<String> readResourceAsLines(String name) throws Exception {
+        try (InputStream is = Main.class.getResourceAsStream(name)) {
+            if (is == null) throw new IllegalArgumentException("Missing resource: " + name);
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                List<String> lines = new ArrayList<>();
+                String line;
+                while ((line = br.readLine()) != null) {
+                    lines.add(line);
+                }
+                return lines;
+            }
+        }
+    }
+
+    private List<String> readResourceAsLinesOptional(String name) throws Exception {
+        InputStream is = Main.class.getResourceAsStream(name);
+        if (is == null) return new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            List<String> lines = new ArrayList<>();
+            String line;
+            while ((line = br.readLine()) != null) {
+                lines.add(line);
+            }
+            return lines;
+        }
+    }
+
+    private Clip loadClipFromResource(String path) throws Exception {
+        try (InputStream is = Main.class.getResourceAsStream("/" + path)) {
+            if (is == null) throw new IllegalArgumentException("Resource not found: " + path);
+
+            byte[] data = is.readAllBytes();
+            try (AudioInputStream ais = AudioSystem.getAudioInputStream(new BufferedInputStream(new ByteArrayInputStream(data)))) {
+                AudioFormat base = ais.getFormat();
+                AudioFormat decoded = new AudioFormat(
+                        AudioFormat.Encoding.PCM_SIGNED,
+                        base.getSampleRate(),
+                        16,
+                        base.getChannels(),
+                        base.getChannels() * 2,
+                        base.getSampleRate(),
+                        false);
+                try (AudioInputStream dais = AudioSystem.getAudioInputStream(decoded, ais)) {
+                    Clip c = AudioSystem.getClip();
+                    c.open(dais);
+                    return c;
+                }
+            }
+        }
+    }
+
     private void initTypingLoop() {
-        String[] candidates = {
-            "keyboard.wav",
-            "src" + File.separator + "keyboard.wav",
-            "bin" + File.separator + "keyboard.wav"
-        };
+        String[] candidates = { "keyboard.wav" };
         for (String path : candidates) {
             try {
-                File f = new File(path);
-                if (!f.exists()) continue;
-                AudioInputStream ais = AudioSystem.getAudioInputStream(f);
-                AudioFormat base = ais.getFormat();
-                AudioFormat decoded = new AudioFormat(AudioFormat.Encoding.PCM_SIGNED, base.getSampleRate(), 16, base.getChannels(), base.getChannels() * 2, base.getSampleRate(), false);
-                AudioInputStream dais = AudioSystem.getAudioInputStream(decoded, ais);
-                Clip c = AudioSystem.getClip();
-                c.open(dais);
+                Clip c = loadClipFromResource(path);
                 typingLoop = c;
                 typingLoopReady = true;
-                typingLoopPath = f.getAbsolutePath();
                 if (c.isControlSupported(FloatControl.Type.SAMPLE_RATE)) {
                     typingRateControl = (FloatControl)c.getControl(FloatControl.Type.SAMPLE_RATE);
                     typingBaseSampleRate = typingRateControl.getValue();
@@ -188,21 +235,91 @@ class AnimationPanel extends JPanel {
                 if (c.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
                     typingGainControl = (FloatControl)c.getControl(FloatControl.Type.MASTER_GAIN);
                 }
-                System.out.println("Loaded typing loop: " + typingLoopPath);
+                System.out.println("Loaded typing loop: " + path);
                 break;
             } catch (Exception ex) {
+                System.out.println("Failed to load: " + path + " - " + ex.getMessage());
                 typingLoop = null;
                 typingLoopReady = false;
-                typingLoopPath = "";
                 typingRateControl = null;
                 typingGainControl = null;
                 typingBaseSampleRate = -1f;
             }
         }
         if (!typingLoopReady) {
-            System.out.println("keyboard.mp3 not loaded (codec or path issue). Place keyboard.mp3 in project root or src/.");
+            System.out.println("keyboard.wav not loaded. Make sure it's in the JAR.");
         }
     }
+
+    private void initBackgroundMusic() {
+        String path = "music.wav";
+        try {
+            Clip c = loadClipFromResource(path);
+            backgroundMusic = c;
+            backgroundMusicReady = true;
+            if (c.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
+                backgroundGainControl = (FloatControl)c.getControl(FloatControl.Type.MASTER_GAIN);
+                System.out.println("Background gain control range: " + backgroundGainControl.getMinimum() + " to " + backgroundGainControl.getMaximum());
+            } else {
+                System.out.println("WARNING: Master gain control not supported!");
+            }
+            System.out.println("Loaded background music: " + path);
+        } catch (Exception ex) {
+            System.out.println("Failed to load: " + path + " - " + ex.getMessage());
+            backgroundMusic = null;
+            backgroundMusicReady = false;
+            backgroundGainControl = null;
+        }
+        if (!backgroundMusicReady) {
+            System.out.println("music.wav not loaded. Make sure it's in the JAR.");
+        }
+    }
+
+    private void initDingSound() {
+        String path = "ding.wav";
+        try {
+            Clip c = loadClipFromResource(path);
+            dingSound = c;
+            dingSoundReady = true;
+            System.out.println("Loaded ding sound: " + path);
+        } catch (Exception ex) {
+            System.out.println("Failed to load: " + path + " - " + ex.getMessage());
+            dingSound = null;
+            dingSoundReady = false;
+        }
+        if (!dingSoundReady) {
+            System.out.println("ding.wav not loaded. Make sure it's in the JAR.");
+        }
+    }
+
+    private void startBackgroundMusic() {
+        if (!backgroundMusicReady || backgroundMusic == null) return;
+        if (!backgroundMusic.isRunning()) {
+            setBackgroundMusicGain(-22);
+            backgroundMusic.setFramePosition(0);
+            backgroundMusic.loop(Clip.LOOP_CONTINUOUSLY);
+        }
+    }
+
+    private void setBackgroundMusicGain(float gainDb) {
+        if (backgroundGainControl == null) return;
+        float clamped = Math.max(backgroundGainControl.getMinimum(), Math.min(backgroundGainControl.getMaximum(), gainDb));
+        backgroundGainControl.setValue(clamped);
+    }
+
+    private void playDing() {
+        if (!dingSoundReady || dingSound == null) return;
+        dingSound.setFramePosition(0);
+        if (dingSound.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
+            FloatControl gainControl = (FloatControl)dingSound.getControl(FloatControl.Type.MASTER_GAIN);
+            gainControl.setValue(-15.0f);
+        }
+        dingSound.start();
+    }
+
+    private void updateBackgroundMusicVolume() {
+    }
+
 
     private int getFadeOutEndFrame() {
         int titleEnd = TITLE_FADE_IN + TITLE_HOLD;
@@ -238,6 +355,7 @@ class AnimationPanel extends JPanel {
     }
 
     private void updateTyping() {
+        updateBackgroundMusicVolume();
         
         if (frame <= getFadeOutEndFrame() || waitingToStart) {
             lastTimeNanos = -1; 
@@ -255,7 +373,9 @@ class AnimationPanel extends JPanel {
         }
         if (pauseUntilNanos > 0 && now >= pauseUntilNanos) {
             pauseUntilNanos = -1;
-            lastTimeNanos = now; 
+            lastTimeNanos = now;
+            charAccumulator = 0.0;
+            totalTypingSeconds = Math.min(totalTypingSeconds, ACCEL_DURATION);
         }
 
         if (typingLoopReady && lastTypeNanos > 0 && (now - lastTypeNanos) > 2_000_000_000L) {
@@ -312,9 +432,14 @@ class AnimationPanel extends JPanel {
         } else {
             clockSpeed = currentWpm / MIN_WPM; 
         }
-        clockMinutes += (dt / 60.0) * clockSpeed * 16.0; 
+        clockMinutes += (dt / 60.0) * clockSpeed * 32.0; 
 
         charAccumulator += charsThisTick;
+        
+        if (charAccumulator >= 1.0 && rawIndex < rawText.length()) {
+            startTypingLoop();
+        }
+        
         while (charAccumulator >= 1.0) {
             if (rawIndex >= rawText.length()) break; 
 
@@ -864,7 +989,8 @@ class AnimationPanel extends JPanel {
                 long duration = Math.min((long)(12_500_000_000L), Math.max((long)(3_750_000_000L), (long)(2_500_000_000L + (currentLeftComment.length() / 50) * 1_250_000_000L)));
                 leftCommentClearUntilNanos = nowNanos + duration;
                 pauseUntilNanos = nowNanos + duration;
-                totalTypingSeconds = 0.0; 
+                totalTypingSeconds = 0.0;
+                charAccumulator = 0.0;
                 return true;
             }
             if (tag.startsWith("RIGHT_COMMENT_")) {
@@ -875,7 +1001,8 @@ class AnimationPanel extends JPanel {
                 long duration = Math.min((long)(12_500_000_000L), Math.max((long)(3_750_000_000L), (long)(2_500_000_000L + (currentRightComment.length() / 50) * 1_250_000_000L)));
                 rightCommentClearUntilNanos = nowNanos + duration;
                 pauseUntilNanos = nowNanos + duration;
-                totalTypingSeconds = 0.0; 
+                totalTypingSeconds = 0.0;
+                charAccumulator = 0.0;
                 return true;
             }
             if (tag.equals("PAUSE")) {
