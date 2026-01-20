@@ -30,6 +30,7 @@ class AnimationPanel extends JPanel {
     private final int BYLINE_FADE_IN = 15;
     private final int BYLINE_HOLD = 15;
     private final int FADE_OUT = 15;
+    private final int PROMPT_FADE_IN = 30;
     private final int FRAME_FADE_IN = 15;
     
     private String documentTitle = "";
@@ -53,8 +54,8 @@ class AnimationPanel extends JPanel {
     private long lastTimeNanos = -1;         
     private double totalTypingSeconds = 0.0; 
     private final double MIN_WPM = 100.0;     
-    private final double MAX_WPM = 800.0;    
-    private final double ACCEL_DURATION = 6.0; 
+    private final double MAX_WPM = 1200.0;    
+    private final double ACCEL_DURATION = 5.0; 
     private long pauseUntilNanos = -1;       
     private long leftCommentClearUntilNanos = -1;  
     private long rightCommentClearUntilNanos = -1; 
@@ -85,10 +86,28 @@ class AnimationPanel extends JPanel {
     private FloatControl typingRateControl;
     private FloatControl typingGainControl;
     private float typingBaseSampleRate = -1f;
+    private boolean waitingToStart = true;
+    private int startPressedFrame = -1;
+    private int endSequenceStartFrame = -1;
+    private final int END_FADE_OUT = 30;
+    private final int END_FADE_IN = 30;
     
     public AnimationPanel() {
         loadFiles();
         initTypingLoop();
+        
+        setFocusable(true);
+        addKeyListener(new java.awt.event.KeyAdapter() {
+            @Override
+            public void keyPressed(java.awt.event.KeyEvent e) {
+                if (waitingToStart && e.getKeyCode() == java.awt.event.KeyEvent.VK_SPACE) {
+                    waitingToStart = false;
+                    startPressedFrame = frame;
+                    lastTypeNanos = System.nanoTime();
+                    repaint();
+                }
+            }
+        });
         
         Timer timer = new Timer(30, e -> {
             frame++;
@@ -96,7 +115,8 @@ class AnimationPanel extends JPanel {
             repaint();
         });
         timer.start();
-        lastTypeNanos = System.nanoTime();
+        
+        SwingUtilities.invokeLater(() -> requestFocusInWindow());
     }
     
     private void loadFiles() {
@@ -219,7 +239,7 @@ class AnimationPanel extends JPanel {
 
     private void updateTyping() {
         
-        if (frame <= getFadeOutEndFrame()) {
+        if (frame <= getFadeOutEndFrame() || waitingToStart) {
             lastTimeNanos = -1; 
             return;
         }
@@ -395,17 +415,20 @@ class AnimationPanel extends JPanel {
         g2d.setPaint(oldPaint);
         
         int titleEnd = TITLE_FADE_IN + TITLE_HOLD;
-        int bylineEnd = titleEnd + BYLINE_FADE_IN + BYLINE_HOLD;
-        int fadeOutEnd = bylineEnd + FADE_OUT;
-        
+        int bylineEnd = titleEnd + BYLINE_FADE_IN + BYLINE_HOLD;        
         
         float titleOpacity = 0;
-        if (frame < TITLE_FADE_IN) {
-            titleOpacity = frame / (float)TITLE_FADE_IN;
-        } else if (frame < bylineEnd) {
-            titleOpacity = 1.0f;
-        } else if (frame < fadeOutEnd) {
-            titleOpacity = 1.0f - (frame - bylineEnd) / (float)FADE_OUT;
+        if (waitingToStart) {
+            if (frame < TITLE_FADE_IN) {
+                titleOpacity = frame / (float)TITLE_FADE_IN;
+            } else {
+                titleOpacity = 1.0f;
+            }
+        } else if (startPressedFrame >= 0) {
+            int elapsedSincePress = frame - startPressedFrame;
+            if (elapsedSincePress < FADE_OUT) {
+                titleOpacity = 1.0f - (elapsedSincePress / (float)FADE_OUT);
+            }
         }
         
         if (titleOpacity > 0) {
@@ -421,12 +444,17 @@ class AnimationPanel extends JPanel {
         
         
         float bylineOpacity = 0;
-        if (frame > titleEnd && frame < titleEnd + BYLINE_FADE_IN) {
-            bylineOpacity = (frame - titleEnd) / (float)BYLINE_FADE_IN;
-        } else if (frame >= titleEnd + BYLINE_FADE_IN && frame < bylineEnd) {
-            bylineOpacity = 1.0f;
-        } else if (frame >= bylineEnd && frame < fadeOutEnd) {
-            bylineOpacity = 1.0f - (frame - bylineEnd) / (float)FADE_OUT;
+        if (waitingToStart) {
+            if (frame > titleEnd && frame < titleEnd + BYLINE_FADE_IN) {
+                bylineOpacity = (frame - titleEnd) / (float)BYLINE_FADE_IN;
+            } else if (frame >= titleEnd + BYLINE_FADE_IN) {
+                bylineOpacity = 1.0f;
+            }
+        } else if (startPressedFrame >= 0) {
+            int elapsedSincePress = frame - startPressedFrame;
+            if (elapsedSincePress < FADE_OUT) {
+                bylineOpacity = 1.0f - (elapsedSincePress / (float)FADE_OUT);
+            }
         }
         
         if (bylineOpacity > 0) {
@@ -438,14 +466,42 @@ class AnimationPanel extends JPanel {
             int x = (getWidth() - fm.stringWidth(byline)) / 2;
             int y = getHeight() / 2 + 40;
             g2d.drawString(byline, x, y);
+            
+            float promptOpacity = 0;
+            if (waitingToStart && frame >= bylineEnd) {
+                int promptStart = bylineEnd;
+                if (frame > promptStart && frame <= promptStart + PROMPT_FADE_IN) {
+                    promptOpacity = (frame - promptStart) / (float)PROMPT_FADE_IN;
+                } else if (frame > promptStart + PROMPT_FADE_IN) {
+                    promptOpacity = 1.0f;
+                }
+            } else if (startPressedFrame >= 0) {
+                int elapsedSincePress = frame - startPressedFrame;
+                if (elapsedSincePress < FADE_OUT) {
+                    promptOpacity = 1.0f - (elapsedSincePress / (float)FADE_OUT);
+                }
+            }
+            
+            if (promptOpacity > 0) {
+                g2d.setFont(new Font("Georgia", Font.PLAIN, 18));
+                FontMetrics promptFm = g2d.getFontMetrics();
+                String prompt = "Press SPACE to start";
+                int promptX = (getWidth() - promptFm.stringWidth(prompt)) / 2;
+                int promptY = getHeight() / 2 + 90;
+                int promptAlpha = (int)(promptOpacity * alpha);
+                g2d.setColor(new Color(0, 0, 0, promptAlpha));
+                g2d.drawString(prompt, promptX, promptY);
+            }
         }
         
         
-        if (frame > fadeOutEnd) {
-            float frameOpacity = Math.min(1.0f, (frame - fadeOutEnd) / (float)FRAME_FADE_IN);
-            int alpha = (int)(frameOpacity * 255);
-            long nowFrame = System.nanoTime();
-            if (labelFadeStartNanos < 0) labelFadeStartNanos = nowFrame;
+        if (!waitingToStart && startPressedFrame >= 0) {
+            int contentStartFrame = startPressedFrame + FADE_OUT;
+            if (frame > contentStartFrame) {
+                float frameOpacity = Math.min(1.0f, (frame - contentStartFrame) / (float)FRAME_FADE_IN);
+                int alpha = (int)(frameOpacity * 255);
+                long nowFrame = System.nanoTime();
+                if (labelFadeStartNanos < 0) labelFadeStartNanos = nowFrame;
             
             int margin = (int)(Math.min(getWidth(), getHeight()) * 0.05);
             
@@ -453,7 +509,7 @@ class AnimationPanel extends JPanel {
             int mainFrameX = margin;
             int mainFrameY = margin;
             int mainFrameWidth = getWidth() - (margin * 2);
-            int mainFrameHeight = (int)(getHeight() * 0.75) - (margin * 2);
+            int mainFrameHeight = (int)(getHeight() * 0.70) - (margin * 2);
             
             double alphaRatio = alpha / 255.0;
             int fillA = (int)(FRAME_FILL.getAlpha() * alphaRatio);
@@ -528,7 +584,7 @@ class AnimationPanel extends JPanel {
             g2d.drawString(clockTime, clockX, clockY);
             
             
-            int commentY = (int)(getHeight() * 0.75);
+            int commentY = (int)(getHeight() * 0.70);
             int totalCommentWidth = getWidth() - (margin * 3);
             int leftCommentWidth = (int)(totalCommentWidth * 0.75);
             int rightCommentWidth = totalCommentWidth - leftCommentWidth;
@@ -616,9 +672,49 @@ class AnimationPanel extends JPanel {
                     }
                 } else {
                     stopTypingLoop();
+                    if (endSequenceStartFrame < 0 && pauseUntilNanos < 0) {
+                        endSequenceStartFrame = frame;
+                    }
                 }
             }
 
+            // Check if end sequence should be displayed
+            if (endSequenceStartFrame >= 0) {
+                int elapsedEnd = frame - endSequenceStartFrame;
+                float endAlpha = 0;
+                
+                if (elapsedEnd < END_FADE_OUT) {
+                    // Fade out main content
+                    endAlpha = 1.0f - (elapsedEnd / (float)END_FADE_OUT);
+                } else if (elapsedEnd >= END_FADE_OUT && elapsedEnd < END_FADE_OUT + END_FADE_IN) {
+                    // Fade in end screen
+                    endAlpha = (elapsedEnd - END_FADE_OUT) / (float)END_FADE_IN;
+                } else {
+                    // Fully show end screen
+                    endAlpha = 1.0f;
+                }
+                
+                if (elapsedEnd >= END_FADE_OUT) {
+                    int endScreenAlpha = (int)(endAlpha * 255);
+                    g2d.setColor(new Color(0, 0, 0, endScreenAlpha));
+                    g2d.setFont(new Font("Georgia", Font.BOLD, 72));
+                    FontMetrics endFm = g2d.getFontMetrics();
+                    String theEnd = "The End";
+                    int endX = (getWidth() - endFm.stringWidth(theEnd)) / 2;
+                    int endY = getHeight() / 2 - 40;
+                    g2d.drawString(theEnd, endX, endY);
+                    
+                    g2d.setFont(new Font("Georgia", Font.ITALIC, 28));
+                    FontMetrics thanksFm = g2d.getFontMetrics();
+                    String thanks = "Thank you Mr. Wu";
+                    int thanksX = (getWidth() - thanksFm.stringWidth(thanks)) / 2;
+                    int thanksY = getHeight() / 2 + 50;
+                    g2d.drawString(thanks, thanksX, thanksY);
+                }
+            }
+            
+            // Only render main content if end sequence hasn't started or is fading out
+            if (endSequenceStartFrame < 0 || frame < endSequenceStartFrame + END_FADE_OUT) {
             
             g2d.setFont(new Font("Georgia", Font.PLAIN, 14));
             FontMetrics cfm = g2d.getFontMetrics();
@@ -673,6 +769,8 @@ class AnimationPanel extends JPanel {
                     g2d.drawString(rlines.get(i), rightInnerX, dy);
                     dy += cfm.getHeight();
                 }
+            }
+            }
             }
         }
     }
