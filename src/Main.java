@@ -3,6 +3,7 @@ import java.awt.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.List;
+import java.util.regex.*;
 import javax.swing.Timer;
 
 public class Main extends JFrame {
@@ -23,25 +24,38 @@ public class Main extends JFrame {
 
 class AnimationPanel extends JPanel {
     private int frame = 0;
-    private final int TITLE_FADE_IN = 30;
-    private final int TITLE_HOLD = 60;
-    private final int BYLINE_FADE_IN = 30;
-    private final int BYLINE_HOLD = 30;
-    private final int FADE_OUT = 30;
-    private final int FRAME_FADE_IN = 30;
+    private final int TITLE_FADE_IN = 15;
+    private final int TITLE_HOLD = 30;
+    private final int BYLINE_FADE_IN = 15;
+    private final int BYLINE_HOLD = 15;
+    private final int FADE_OUT = 15;
+    private final int FRAME_FADE_IN = 15;
     
     private String documentTitle = "";
     private List<String> titleLines = new ArrayList<>();
+    private List<String> leftComments = new ArrayList<>();
+    private List<String> rightComments = new ArrayList<>();
+    private String currentLeftComment = "";
+    private String currentRightComment = "";
     
     // Typing effect state
-    private String fullText = "";           // processed text to display (markers removed)
-    private int typedChars = 0;              // number of characters currently typed
+    private String rawText = "";            // original writing with markers
+    private StringBuilder typedBuffer = new StringBuilder(); // currently visible text
+    private int rawIndex = 0;                // index into rawText
+    private String fullText = "";           // legacy (unused for typing)
+    private int typedChars = 0;              // legacy (unused for typing)
     private double charAccumulator = 0.0;    // fractional character accumulator
     private long lastTimeNanos = -1;         // last timestamp for typing update
     private double totalTypingSeconds = 0.0; // total typing time since start
-    private final double MIN_WPM = 50.0;     // starting speed
+    private final double MIN_WPM = 100.0;     // starting speed
     private final double MAX_WPM = 800.0;    // max speed (increased)
-    private final double ACCEL_DURATION = 8.0; // faster acceleration to max speed
+    private final double ACCEL_DURATION = 10.0; // faster acceleration to max speed
+    private long pauseUntilNanos = -1;       // typing pause control
+    private long leftCommentClearUntilNanos = -1;  // clear left comment at this time
+    private long rightCommentClearUntilNanos = -1; // clear right comment at this time
+    private long leftCommentStartNanos = -1;  // when left comment fade-in started
+    private long rightCommentStartNanos = -1; // when right comment fade-in started
+    private final long COMMENT_FADE_DURATION_NANOS = 300_000_000L; // 300ms fade-in
     
     public AnimationPanel() {
         loadFiles();
@@ -63,6 +77,12 @@ class AnimationPanel extends JPanel {
             String titlesPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\titles.txt";
             titleLines = Files.readAllLines(Paths.get(titlesPath));
             
+            // Load comments
+            String leftPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\left_comments.txt";
+            String rightPath = "C:\\Users\\ariba\\Desktop\\Program Files\\ICS\\School\\visual-essay\\src\\right_comments.txt";
+            if (Files.exists(Paths.get(leftPath))) leftComments = Files.readAllLines(Paths.get(leftPath));
+            if (Files.exists(Paths.get(rightPath))) rightComments = Files.readAllLines(Paths.get(rightPath));
+            
             // Parse [TITLE_NUMBER] pattern
             int start = raw.indexOf("[TITLE_");
             if (start >= 0) {
@@ -81,9 +101,11 @@ class AnimationPanel extends JPanel {
                 }
             }
 
-            // Prepare the body text: remove bracketed control markers like [TITLE_1], [LEFT_COMMENT_1], [PAUSE], etc.
-            // Keep the actual prose only.
-            fullText = raw.replaceAll("\\[[A-Z_0-9]+\\]", "").trim();
+            // Prepare typing stream with markers
+            rawText = raw;
+            typedBuffer.setLength(0);
+            rawIndex = 0;
+            fullText = "";
         } catch (Exception e) {
             documentTitle = "";
             fullText = "";
@@ -103,33 +125,69 @@ class AnimationPanel extends JPanel {
             lastTimeNanos = -1; // ensure timer starts when typing begins
             return;
         }
-        if (fullText == null || fullText.isEmpty() || typedChars >= fullText.length()) {
-            return;
-        }
-
         long now = System.nanoTime();
         if (lastTimeNanos < 0) {
             lastTimeNanos = now;
             return;
         }
 
+        if (pauseUntilNanos > 0 && now < pauseUntilNanos) {
+            return;
+        }
+
+        // Pause ended; reset timing so acceleration starts fresh
+        if (pauseUntilNanos > 0 && now >= pauseUntilNanos) {
+            pauseUntilNanos = -1;
+            lastTimeNanos = now; // critical: prevent dt spike when pause ends
+        }
+
+        // Handle comment auto-clear
+        if (leftCommentClearUntilNanos > 0 && now >= leftCommentClearUntilNanos) {
+            currentLeftComment = "";
+            leftCommentClearUntilNanos = -1;
+            leftCommentStartNanos = -1;
+        }
+        if (rightCommentClearUntilNanos > 0 && now >= rightCommentClearUntilNanos) {
+            currentRightComment = "";
+            rightCommentClearUntilNanos = -1;
+            rightCommentStartNanos = -1;
+        }
+
         double dt = (now - lastTimeNanos) / 1_000_000_000.0; // seconds
         lastTimeNanos = now;
         totalTypingSeconds += dt;
 
-        // Linear acceleration from MIN_WPM to MAX_WPM over ACCEL_DURATION seconds
+        // Acceleration from MIN_WPM to MAX_WPM over ACCEL_DURATION seconds
         double t = Math.min(1.0, totalTypingSeconds / ACCEL_DURATION);
-        // Ease-in (quadratic) to increase acceleration noticeably
         double tEased = t * t;
         double currentWpm = MIN_WPM + (MAX_WPM - MIN_WPM) * tEased;
-        double charsPerSecond = (currentWpm * 5.0) / 60.0; // 5 chars per "word" convention
+        double charsPerSecond = (currentWpm * 5.0) / 60.0;
         double charsThisTick = charsPerSecond * dt;
 
         charAccumulator += charsThisTick;
-        int advance = (int)Math.floor(charAccumulator);
-        if (advance > 0) {
-            typedChars = Math.min(fullText.length(), typedChars + advance);
-            charAccumulator -= advance;
+        while (charAccumulator >= 1.0) {
+            if (rawIndex >= rawText.length()) break; // finished
+
+            // Marker handling
+            if (rawText.charAt(rawIndex) == '[') {
+                int close = rawText.indexOf(']', rawIndex);
+                if (close > rawIndex) {
+                    String tag = rawText.substring(rawIndex + 1, close); // without brackets
+                    if (handleMarker(tag, now)) {
+                        rawIndex = close + 1; // consume marker
+                        // if we started a pause, stop consuming this tick
+                        if (pauseUntilNanos > 0 && System.nanoTime() < pauseUntilNanos) {
+                            break;
+                        }
+                        continue; // process next
+                    }
+                }
+            }
+
+            // Normal character
+            typedBuffer.append(rawText.charAt(rawIndex));
+            rawIndex++;
+            charAccumulator -= 1.0;
         }
     }
     
@@ -226,7 +284,7 @@ class AnimationPanel extends JPanel {
             g2d.drawRoundRect(rightCommentX, commentY, commentWidth, commentHeight, 15, 15);
 
             // Draw typed body text with visual cursor inside the main frame
-            if (!fullText.isEmpty()) {
+            if (typedBuffer.length() > 0 || (rawText != null && rawIndex < rawText.length())) {
                 g2d.setColor(new Color(0, 0, 0, alpha));
                 g2d.setFont(new Font("Georgia", Font.PLAIN, 18));
                 FontMetrics tfm = g2d.getFontMetrics();
@@ -235,7 +293,7 @@ class AnimationPanel extends JPanel {
                 int textWidth = mainFrameWidth - 40;
                 int lineHeight = tfm.getHeight();
 
-                String visible = fullText.substring(0, Math.min(typedChars, fullText.length()));
+                String visible = typedBuffer.toString();
                 java.util.List<String> lines = wrapTextToLines(g2d, visible, textWidth);
 
                 int contentHeight = mainFrameHeight - (textY - mainFrameY) - 20; // bottom padding
@@ -249,7 +307,8 @@ class AnimationPanel extends JPanel {
                 }
 
                 // Blinking caret (visible ~500ms on/off), lighter color
-                if (typedChars < fullText.length()) {
+                boolean hasMoreToType = rawText != null && rawIndex < rawText.length();
+                if (hasMoreToType) {
                     boolean showCaret = ((int)(totalTypingSeconds * 2)) % 2 == 0; // toggle every ~0.5s
                     if (showCaret) {
                         if (!lines.isEmpty()) {
@@ -266,6 +325,62 @@ class AnimationPanel extends JPanel {
                             g2d.setColor(prev);
                         }
                     }
+                }
+            }
+
+            // Render comments in the bottom boxes with fade-in
+            g2d.setFont(new Font("Georgia", Font.PLAIN, 18));
+            FontMetrics cfm = g2d.getFontMetrics();
+            int padding = 12;
+            int leftInnerX = margin + padding;
+            int leftInnerW = commentWidth - padding * 2;
+            int leftInnerH = commentHeight - padding * 2;
+            int leftInnerY = commentY + padding + cfm.getAscent();
+            int rightInnerX = rightCommentX + padding;
+            int rightInnerW = commentWidth - padding * 2;
+            int rightInnerH = commentHeight - padding * 2;
+            int rightInnerY = commentY + padding + cfm.getAscent();
+
+            long now = System.nanoTime();
+
+            if (currentLeftComment != null && !currentLeftComment.isEmpty()) {
+                // Calculate fade-in opacity
+                float commentOpacity = 1.0f;
+                if (leftCommentStartNanos > 0) {
+                    long elapsed = now - leftCommentStartNanos;
+                    if (elapsed < COMMENT_FADE_DURATION_NANOS) {
+                        commentOpacity = elapsed / (float)COMMENT_FADE_DURATION_NANOS;
+                    }
+                }
+                int commentAlpha = (int)(commentOpacity * alpha);
+                g2d.setColor(new Color(0, 0, 0, commentAlpha));
+                
+                java.util.List<String> llines = wrapTextToLines(g2d, currentLeftComment, leftInnerW);
+                int maxL = Math.max(1, leftInnerH / cfm.getHeight());
+                int dy = leftInnerY;
+                for (int i = 0; i < Math.min(maxL, llines.size()); i++) {
+                    g2d.drawString(llines.get(i), leftInnerX, dy);
+                    dy += cfm.getHeight();
+                }
+            }
+            if (currentRightComment != null && !currentRightComment.isEmpty()) {
+                // Calculate fade-in opacity
+                float commentOpacity = 1.0f;
+                if (rightCommentStartNanos > 0) {
+                    long elapsed = now - rightCommentStartNanos;
+                    if (elapsed < COMMENT_FADE_DURATION_NANOS) {
+                        commentOpacity = elapsed / (float)COMMENT_FADE_DURATION_NANOS;
+                    }
+                }
+                int commentAlpha = (int)(commentOpacity * alpha);
+                g2d.setColor(new Color(0, 0, 0, commentAlpha));
+                
+                java.util.List<String> rlines = wrapTextToLines(g2d, currentRightComment, rightInnerW);
+                int maxR = Math.max(1, rightInnerH / cfm.getHeight());
+                int dy = rightInnerY;
+                for (int i = 0; i < Math.min(maxR, rlines.size()); i++) {
+                    g2d.drawString(rlines.get(i), rightInnerX, dy);
+                    dy += cfm.getHeight();
                 }
             }
         }
@@ -325,71 +440,39 @@ class AnimationPanel extends JPanel {
         return result;
     }
 
-    // Draws wrapped text within the given width. Returns the caret position (x,y baseline) at the end.
-    private Point drawWrappedText(Graphics2D g2d, String text, int x, int y, int maxWidth, int lineHeight) {
-        FontMetrics fm = g2d.getFontMetrics();
-        int cursorX = x;
-        int cursorY = y + fm.getAscent();
-        if (text == null || text.isEmpty()) {
-            return new Point(cursorX, cursorY);
-        }
-
-        StringBuilder line = new StringBuilder();
-        int i = 0;
-        while (i < text.length()) {
-            char c = text.charAt(i);
-            if (c == '\n') {
-                // Draw current line and move to next
-                g2d.drawString(line.toString(), x, y);
-                y += lineHeight;
-                line.setLength(0);
-                i++;
-                continue;
+    // Marker handling
+    private boolean handleMarker(String tag, long nowNanos) {
+        try {
+            if (tag.startsWith("TITLE_")) {
+                int n = Integer.parseInt(tag.substring(6));
+                if (n > 0 && n - 1 < titleLines.size()) documentTitle = titleLines.get(n - 1);
+                return true;
             }
-
-            // Consume any whitespace as a single space (avoid leading spaces)
-            if (Character.isWhitespace(c)) {
-                // Only add a space if line currently has content
-                if (line.length() > 0) {
-                    // Space alone won't overflow; just add it
-                    line.append(' ');
-                }
-                // advance through contiguous whitespace
-                while (i < text.length() && Character.isWhitespace(text.charAt(i)) && text.charAt(i) != '\n') {
-                    i++;
-                }
-                continue;
+            if (tag.startsWith("LEFT_COMMENT_")) {
+                int n = Integer.parseInt(tag.substring(13));
+                if (n > 0 && n - 1 < leftComments.size()) currentLeftComment = leftComments.get(n - 1);
+                leftCommentStartNanos = nowNanos;
+                leftCommentClearUntilNanos = nowNanos + 2_000_000_000L; // show for 2s
+                pauseUntilNanos = nowNanos + 2_000_000_000L; // pause typing for 2s
+                totalTypingSeconds = 0.0; // reset speed accumulator
+                return true;
             }
-
-            // Consume a word (sequence of non-whitespace, non-newline)
-            int start = i;
-            while (i < text.length()) {
-                char ch = text.charAt(i);
-                if (ch == '\n' || Character.isWhitespace(ch)) break;
-                i++;
+            if (tag.startsWith("RIGHT_COMMENT_")) {
+                int n = Integer.parseInt(tag.substring(14));
+                if (n > 0 && n - 1 < rightComments.size()) currentRightComment = rightComments.get(n - 1);
+                rightCommentStartNanos = nowNanos;
+                rightCommentClearUntilNanos = nowNanos + 2_000_000_000L; // show for 2s
+                pauseUntilNanos = nowNanos + 2_000_000_000L; // pause typing for 2s
+                totalTypingSeconds = 0.0; // reset speed accumulator
+                return true;
             }
-            String word = text.substring(start, i);
-
-            // Decide to put word on current line or wrap
-            String candidate = (line.length() == 0) ? word : line.toString() + word;
-            int width = fm.stringWidth(candidate);
-            if (width <= maxWidth || line.length() == 0) {
-                // Fits on this line (or line empty even if long word)
-                line.setLength(0);
-                line.append(candidate);
-            } else {
-                // Draw current line and move to next, start with this word
-                g2d.drawString(line.toString(), x, y);
-                y += lineHeight;
-                line.setLength(0);
-                line.append(word);
+            if (tag.equals("PAUSE")) {
+                pauseUntilNanos = nowNanos + 1_000_000_000L; // 1s
+                totalTypingSeconds = 0.0; // reset speed to restart from MIN_WPM
+                return true;
             }
-        }
-
-        // Draw remainder
-        g2d.drawString(line.toString(), x, y);
-        cursorX = x + fm.stringWidth(line.toString());
-        cursorY = y + fm.getAscent();
-        return new Point(cursorX, cursorY);
+        } catch (Exception ignore) { }
+        return false; // not a known marker
     }
 }
+
